@@ -8,6 +8,7 @@ import {
   createPaymentOrder,
   verifyPaymentSignature,
   fetchOrderSummary,
+  reportOrderTotalMismatch,
   CONFIGURED_RAZORPAY_KEY,
 } from "@/lib/api";
 import { openRazorpayCheckout } from "@/lib/razorpay";
@@ -53,10 +54,36 @@ export function ProductCard({ product, onCheckoutComplete, onError }: ProductCar
 
       // Step 1: Ensure we have latest order summary from server route
       const summary = await fetchOrderSummary(product.pricePaise);
-      const finalAmountPaise = summary.total_paise;
+      const finalAmountPaise = summary.total_paise; // ← may be Math.trunc'd (buggy)
+
+      // ── Mismatch Detection Bridge ─────────────────────────────────────────────
+      // Compute what the CORRECT total should be using Math.round (the right way),
+      // then compare against what the /api/order-summary route actually returned.
+      // The route has a deliberate Math.trunc defect so for non-whole-number fees
+      // (e.g. 12345 × 0.02 = 246.9) the totals will differ by 1 paise.
+      const FEE_RATE = 0.02;
+      const expectedFeePaise = Math.round(product.pricePaise * FEE_RATE);
+      const expectedTotalPaise = product.pricePaise + expectedFeePaise;
+      const actualTotalPaise = summary.total_paise;
 
       // Step 2: Call Telex backend to create Razorpay Order & PaymentAttempt
-      const orderData = await createPaymentOrder(finalAmountPaise);
+      // We use the ACTUAL (possibly buggy) total so the PaymentAttempt.amount on
+      // the backend matches actualTotalPaise — required by /report-mismatch validation.
+      const orderData = await createPaymentOrder(actualTotalPaise);
+
+      // ── Report mismatch to Telex if detected ──────────────────────────────────
+      // Fires asynchronously so it never blocks the user's checkout flow.
+      if (expectedTotalPaise !== actualTotalPaise && orderData.payment_attempt_id) {
+        console.warn(
+          `[Aura] Fee rounding mismatch detected! expected=${expectedTotalPaise} actual=${actualTotalPaise} — reporting to Telex`
+        );
+        reportOrderTotalMismatch({
+          payment_attempt_id: orderData.payment_attempt_id,
+          expected_total_paise: expectedTotalPaise,
+          actual_total_paise: actualTotalPaise,
+        });
+        // ^ Fire-and-forget: Telex handles code_defect → AI patch pipeline
+      }
 
       // Determine public Razorpay key ID
       const keyId = orderData.key_id || CONFIGURED_RAZORPAY_KEY;

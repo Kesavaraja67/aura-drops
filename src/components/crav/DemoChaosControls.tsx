@@ -3,7 +3,7 @@
 import React, { useState } from "react";
 import { Clock, Database, Zap } from "lucide-react";
 import { Product, CheckoutResult, FailureType } from "@/types/store";
-import { createPaymentOrder, simulateInfrastructureFailure } from "@/lib/api";
+import { createPaymentOrder, simulateInfrastructureFailure, fetchOrderSummary, reportOrderTotalMismatch } from "@/lib/api";
 import { BlobButton } from "./BlobButton";
 
 interface DemoChaosControlsProps {
@@ -19,6 +19,8 @@ export function DemoChaosControls({
 }: DemoChaosControlsProps) {
   const [selectedProductId, setSelectedProductId] = useState<string>(products[0]?.id || "");
   const [activeSimulation, setActiveSimulation] = useState<FailureType | null>(null);
+  const [defectTriggering, setDefectTriggering] = useState(false);
+  const [defectResult, setDefectResult] = useState<{ triggered: boolean; expected: number; actual: number } | null>(null);
 
   const selectedProduct = products.find((p) => p.id === selectedProductId) || products[0];
 
@@ -52,6 +54,54 @@ export function DemoChaosControls({
     } catch (err: any) {
       setActiveSimulation(null);
       onError(err.message || `Failed to trigger ${failureType} simulation.`);
+    }
+  };
+
+  /**
+   * Code-Defect Trigger (PATH C)
+   * Creates a fractional ₹123.45 order (12345 paise), fetches the buggy
+   * /api/order-summary total (Math.trunc → 246), computes the correct total
+   * (Math.round → 247), detects the 1-paise mismatch, and reports it to Telex
+   * via POST /api/payments/report-mismatch.
+   *
+   * This fires Telex: order_total_mismatch → code_defect → generate_patch → GitHub PR
+   */
+  const handleTriggerCodeDefect = async () => {
+    const FRACTIONAL_PRICE_PAISE = 12345; // ₹123.45 — triggers Math.trunc vs Math.round diff
+    const FEE_RATE = 0.02;
+    try {
+      setDefectTriggering(true);
+      setDefectResult(null);
+
+      // 1. Get the buggy total from the seeded /api/order-summary route
+      const summary = await fetchOrderSummary(FRACTIONAL_PRICE_PAISE);
+      const actualTotalPaise = summary.total_paise; // Math.trunc → 246 → total 12591
+
+      // 2. Compute the correct total
+      const expectedFeePaise = Math.round(FRACTIONAL_PRICE_PAISE * FEE_RATE); // 247
+      const expectedTotalPaise = FRACTIONAL_PRICE_PAISE + expectedFeePaise;   // 12592
+
+      // 3. Create a real PaymentAttempt for the ACTUAL (buggy) amount so
+      //    /report-mismatch validation passes (it checks PaymentAttempt.amount === actual)
+      const orderData = await createPaymentOrder(actualTotalPaise);
+
+      if (expectedTotalPaise !== actualTotalPaise) {
+        // 4. Report mismatch to Telex → triggers code_defect → AI patch pipeline
+        const reportResult = await reportOrderTotalMismatch({
+          payment_attempt_id: orderData.payment_attempt_id,
+          expected_total_paise: expectedTotalPaise,
+          actual_total_paise: actualTotalPaise,
+        });
+        console.info("[Aura] report-mismatch result:", reportResult);
+        setDefectResult({ triggered: true, expected: expectedTotalPaise, actual: actualTotalPaise });
+      } else {
+        // No mismatch — bug may have been patched
+        setDefectResult({ triggered: false, expected: expectedTotalPaise, actual: actualTotalPaise });
+      }
+    } catch (err: any) {
+      onError(err.message || "Failed to trigger code defect simulation.");
+    } finally {
+      setDefectTriggering(false);
     }
   };
 
@@ -100,8 +150,8 @@ export function DemoChaosControls({
           </div>
         </div>
 
-        {/* 2 Chaos Action Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-5 lg:gap-6">
+        {/* 3 Cards grid for all 3 demo scenarios */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-5 lg:gap-6">
           {/* Card 1: Gateway Timeout */}
           <div className="bg-[#FFF9F2] text-[#4C0016] rounded-3xl border-4 border-[#FFD750] p-6 shadow-[0_8px_0_#FFD750] hover:shadow-[0_12px_0_#FFD750] transition-all duration-300 flex flex-col justify-between">
             <div>
@@ -180,6 +230,65 @@ export function DemoChaosControls({
                 className="w-full sm:w-auto"
               >
                 <span>TRIGGER DB OUTAGE</span>
+              </BlobButton>
+            </div>
+          </div>
+
+          {/* Card 3: Code Defect (order_total_mismatch → AI patch) */}
+          <div className="bg-[#FFF9F2] text-[#4C0016] rounded-3xl border-4 border-[#60A905] p-6 shadow-[0_8px_0_#60A905] hover:shadow-[0_12px_0_#60A905] transition-all duration-300 flex flex-col justify-between">
+            <div>
+              <div className="flex items-center gap-3 mb-3">
+                <div className="w-10 h-10 rounded-2xl bg-[#60A905] border-2 border-[#4C0016] flex items-center justify-center text-white shadow-xs">
+                  <Zap className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-modak text-2xl text-[#60A905] leading-none" style={{ WebkitTextStroke: "1px #4C0016" }}>
+                    CODE DEFECT
+                  </h3>
+                  <span className="font-mono text-[11px] font-bold text-[#4C0016]/70">
+                    order_total_mismatch
+                  </span>
+                </div>
+              </div>
+
+              <p className="font-mouse-memoirs text-base sm:text-lg text-[#4C0016] leading-snug">
+                Uses a fractional ₹123.45 order to expose the <code className="font-mono bg-[#FFD750] px-1 rounded">Math.trunc</code> fee-rounding bug.
+                Aura detects the 1-paise mismatch and reports it to Telex, which generates and verifies an AI patch.
+              </p>
+
+              {defectResult && (
+                <div className={`mt-3 p-2.5 rounded-xl border-2 text-xs font-mono font-bold ${
+                  defectResult.triggered
+                    ? "bg-[#60A905]/10 border-[#60A905] text-[#4C0016]"
+                    : "bg-[#FFD750]/30 border-[#FFD750] text-[#4C0016]"
+                }`}>
+                  {defectResult.triggered ? (
+                    <>
+                      ✅ MISMATCH REPORTED TO TELEX<br />
+                      expected={defectResult.expected}p · actual={defectResult.actual}p<br />
+                      → Check Render logs: order_total_mismatch → code_defect → generate_patch
+                    </>
+                  ) : (
+                    <>⚠️ No mismatch: expected={defectResult.expected}p · actual={defectResult.actual}p (bug may be patched!)</>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className="mt-6 pt-3 border-t-2 border-[#4C0016]/10 flex flex-col sm:flex-row items-center justify-between gap-3">
+              <span className="font-mono text-xs font-bold text-[#4C0016]/60">
+                POST /api/payments/report-mismatch
+              </span>
+
+              <BlobButton
+                onClick={handleTriggerCodeDefect}
+                isLoading={defectTriggering}
+                disabled={activeSimulation !== null || defectTriggering}
+                variant="mustard"
+                size="md"
+                className="w-full sm:w-auto"
+              >
+                <span>TRIGGER CODE DEFECT</span>
               </BlobButton>
             </div>
           </div>

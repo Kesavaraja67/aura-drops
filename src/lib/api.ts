@@ -169,6 +169,45 @@ export async function fetchPaymentAttemptRecoveryEvents(
 }
 
 /**
+ * Reports an order-total mismatch to the Telex backend.
+ *
+ * Called by Aura Drops when the /api/order-summary route returns a total that
+ * disagrees with the locally-computed correct total (Math.round vs Math.trunc).
+ * This is what triggers Telex's code_defect classification → AI patch pipeline.
+ */
+export async function reportOrderTotalMismatch(params: {
+  payment_attempt_id: string;
+  expected_total_paise: number;
+  actual_total_paise: number;
+}): Promise<{ success: boolean; message?: string }> {
+  const url = `${API_BASE_URL}/api/payments/report-mismatch`;
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    });
+
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      console.warn(`[Aura] report-mismatch returned HTTP ${response.status}:`, data);
+      return { success: false, message: data.detail || `HTTP ${response.status}` };
+    }
+
+    console.info(
+      `[Aura] order_total_mismatch reported → Telex code_defect pipeline triggered. expected=${params.expected_total_paise} actual=${params.actual_total_paise}`
+    );
+    return { success: true, message: data.message };
+  } catch (err: any) {
+    console.warn(`[Aura] report-mismatch network error:`, err.message);
+    return { success: false, message: err.message };
+  }
+}
+
+
+/**
  * Simulates an infrastructure-level failure (Path B ONLY).
  * Calls POST /api/payments/pay/{payment_attempt_id} with force_failure.
  */
