@@ -8,7 +8,7 @@ export async function POST(req: Request) {
   // ⚠ SEEDED DEFECT (deliberate, for the Telex code-healing demo):
   // Integer division truncates instead of rounding, so the fee — and therefore
   // the total — is occasionally off by a paisa or more, especially on small carts.
-  const fee_paise = Math.trunc(subtotal_paise * FEE_RATE); // BUG: should round, not truncate
+  const fee_paise = Math.round(subtotal_paise * FEE_RATE); // BUG: should round, not truncate
   const total_paise = subtotal_paise + fee_paise;
 
   return Response.json({ subtotal_paise, fee_paise, total_paise });
